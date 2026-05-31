@@ -3,6 +3,7 @@ import xarray as xr
 from glob import glob 
 import re
 import xesmf as xe
+import numpy as np
 
 
 # ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
@@ -100,6 +101,58 @@ def slice_to_domain(xr_ds,
     
     sliced_domain = xr_ds.sel(grid_longitude=slice(min_gridlon, max_gridlon), grid_latitude=slice(min_gridlat, max_gridlat))
     return sliced_domain
+# ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+def mask_altitude(xr_ds,
+                  max_altitude = 16000):
+    
+    """
+    mask out values above a certain altitude (!! not grid level number !!) 
+    - above this alt values will be nan -> ignored
+
+    Args:
+        xr_ds (xarray dataset): dataset to mask
+        max_altitude (float, optional): maximum altitude to include in dataset. Defaults to 16000.
+
+    Returns:
+        xarray dataset: masked dataset
+    """
+
+    masked_ds = xr_ds.where(xr_ds['true_level_height_asl'] <= max_altitude)
+    return masked_ds
+
+# ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+def mask_non_cloud(xr_ds,
+                   min_cloud_fraction_value = 1.0,
+                   cloud_fraction_type = 'equals',
+                   total_mass_min = 1e-6):
+    
+    """
+    mask out non cloud values - non cloud values will be nan -> ignored
+
+    Args:
+        xr_ds (xarray dataset): dataset to mask
+        min_cloud_fraction_value (float, optional): minimum fraction of cloud to be included
+        cloud_fraction_type (str, optional): type of comparison to use. Defaults to 'equals'.
+        total_mass_min (float, optional): minimum total mass to be included. Defaults to 1e-6 - as defined in Declan's paper.
+    Returns:
+        xarray dataset: masked dataset
+    """
+    if cloud_fraction_type == 'equals':
+        cloud_mask = xr.where((xr_ds["cloud_volume_fraction_in_atmosphere_layer"] == min_cloud_fraction_value), 1, np.nan)
+    elif cloud_fraction_type == 'greater':
+        cloud_mask = xr.where((xr_ds["cloud_volume_fraction_in_atmosphere_layer"] >= min_cloud_fraction_value), 1, np.nan)
+    else:
+        raise ValueError("Invalid cloud_fraction_type. Please choose 'equals' or 'greater'.")
+    
+    model_allcloud =  xr_ds.where(cloud_mask)
+
+    if total_mass_min is not None:
+        # !! rain is not classed as cloud here !!
+        total_mass = xr_ds["mass_fraction_of_cloud_ice_in_air"] + xr_ds["mass_fraction_of_cloud_ice_crystals_in_air"] + xr_ds["mass_fraction_of_cloud_liquid_water_in_air"] + xr_ds["mass_fraction_of_graupel_in_air"]
+        mass_mask = xr.where(total_mass >= total_mass_min, 1, np.nan)
+        model_allcloud = model_allcloud.where(mass_mask)
+
+    return model_allcloud
 
 # ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
 def make_variable(big_xr,
@@ -156,3 +209,34 @@ def make_variable(big_xr,
         big_xr[new_var_name_l].attrs["long_name"] = f"{var_name} {number_or_mass} concentration ({units[number_or_mass]})"
     
     return big_xr
+
+
+def kg_to_g(big_xr,
+            var_name):
+    
+    """ 
+    converting the mass variable kg/kg -> g/kg (standard for this)
+    
+    Args:
+        big_xr (xarray dataset): the dataset to add the new variable to
+        var_name (str): the hydrometeor type, e.g. 'graupel', 'cloud', 'ice', 'snow', 'rain'
+
+    Returns:
+        big_xr (xarray dataset): the input dataset with the new variable(s) added
+    """
+    var_dict = {'graupel': 'mass_fraction_of_graupel_in_air',
+                'cloud' : 'mass_fraction_of_cloud_liquid_water_in_air',
+                'ice' : 'mass_fraction_of_cloud_ice_in_air',
+                'snow' : 'mass_fraction_of_cloud_ice_crystals_in_air',
+                'rain' : 'mass_fraction_of_rain_in_air'}
+    
+    og_variable = var_dict[var_name]
+    new_var_name_l = f'{var_name}_g_kg'
+    big_xr[new_var_name_l] = big_xr[og_variable] * 1e3
+    big_xr[new_var_name_l].attrs["units"] = 'g kg-1'
+    big_xr[new_var_name_l].attrs["long_name"] = f"{var_name} mass concentration (g kg-1)"
+
+    return big_xr
+
+
+
